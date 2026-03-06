@@ -16,6 +16,9 @@ type traceLogger struct {
 	lastHeap uint64
 }
 
+// largeMemoryIncreaseThreshold is the threshold for flagging large memory increases in the trace log.
+const largeMemoryIncreaseThreshold = 10 * 1024 * 1024 // 10 MB
+
 func newTraceLogger(w io.Writer) *traceLogger {
 	tl := &traceLogger{w: w}
 	// Capture initial memory baseline
@@ -74,7 +77,7 @@ func (tl *traceLogger) LogFileEvent(event string, uri string, before, after memS
 	fmt.Fprintf(tl.w, "  HeapSys: %s, TotalAlloc: %s, GC cycles: %d\n",
 		formatBytes(after.HeapSys), formatBytes(after.TotalAlloc), after.NumGC)
 
-	if totalDelta > 10*1024*1024 { // >10MB increase from last event
+	if totalDelta > largeMemoryIncreaseThreshold {
 		fmt.Fprintf(tl.w, "  *** LARGE MEMORY INCREASE: %s since last event ***\n", formatBytesDelta(totalDelta))
 	}
 
@@ -95,7 +98,7 @@ func (tl *traceLogger) LogRequest(method string, id string, duration time.Durati
 	fmt.Fprintf(tl.w, "  HeapAlloc: %s -> %s (delta: %s)\n",
 		formatBytes(before.HeapAlloc), formatBytes(after.HeapAlloc), formatBytesDelta(delta))
 
-	if delta > 10*1024*1024 { // >10MB increase
+	if delta > largeMemoryIncreaseThreshold {
 		fmt.Fprintf(tl.w, "  *** LARGE MEMORY INCREASE ***\n")
 	}
 

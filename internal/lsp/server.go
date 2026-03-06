@@ -1148,55 +1148,52 @@ func (s *Server) handleDidChangeWorkspaceConfiguration(ctx context.Context, para
 
 func (s *Server) handleDidOpen(ctx context.Context, params *lsproto.DidOpenTextDocumentParams) error {
 	uri := params.TextDocument.Uri
-	if s.traceLog != nil {
-		before := captureMemSnapshot()
-		s.session.DidOpenFile(ctx, uri, params.TextDocument.Version, params.TextDocument.Text, params.TextDocument.LanguageId)
-		after := captureMemSnapshot()
-		s.traceLog.LogFileEvent("OPEN", string(uri), before, after)
-		s.traceLogProjects()
-		return nil
-	}
+	before := s.captureTraceMemBefore()
 	s.session.DidOpenFile(ctx, uri, params.TextDocument.Version, params.TextDocument.Text, params.TextDocument.LanguageId)
+	s.traceFileEvent("OPEN", string(uri), before)
+	s.traceLogProjects()
 	return nil
 }
 
 func (s *Server) handleDidChange(ctx context.Context, params *lsproto.DidChangeTextDocumentParams) error {
 	uri := params.TextDocument.Uri
-	if s.traceLog != nil {
-		before := captureMemSnapshot()
-		s.session.DidChangeFile(ctx, uri, params.TextDocument.Version, params.ContentChanges)
-		after := captureMemSnapshot()
-		s.traceLog.LogFileEvent("CHANGE", string(uri), before, after)
-		return nil
-	}
+	before := s.captureTraceMemBefore()
 	s.session.DidChangeFile(ctx, uri, params.TextDocument.Version, params.ContentChanges)
+	s.traceFileEvent("CHANGE", string(uri), before)
 	return nil
 }
 
 func (s *Server) handleDidSave(ctx context.Context, params *lsproto.DidSaveTextDocumentParams) error {
 	uri := params.TextDocument.Uri
-	if s.traceLog != nil {
-		before := captureMemSnapshot()
-		s.session.DidSaveFile(ctx, uri)
-		after := captureMemSnapshot()
-		s.traceLog.LogFileEvent("SAVE", string(uri), before, after)
-		return nil
-	}
+	before := s.captureTraceMemBefore()
 	s.session.DidSaveFile(ctx, uri)
+	s.traceFileEvent("SAVE", string(uri), before)
 	return nil
 }
 
 func (s *Server) handleDidClose(ctx context.Context, params *lsproto.DidCloseTextDocumentParams) error {
 	uri := params.TextDocument.Uri
-	if s.traceLog != nil {
-		before := captureMemSnapshot()
-		s.session.DidCloseFile(ctx, uri)
-		after := captureMemSnapshot()
-		s.traceLog.LogFileEvent("CLOSE", string(uri), before, after)
-		return nil
-	}
+	before := s.captureTraceMemBefore()
 	s.session.DidCloseFile(ctx, uri)
+	s.traceFileEvent("CLOSE", string(uri), before)
 	return nil
+}
+
+// captureTraceMemBefore captures a memory snapshot for trace logging.
+// Returns a zero-value snapshot if tracing is not enabled.
+func (s *Server) captureTraceMemBefore() memSnapshot {
+	if s.traceLog != nil {
+		return captureMemSnapshot()
+	}
+	return memSnapshot{}
+}
+
+// traceFileEvent logs a file event with memory delta if trace logging is enabled.
+func (s *Server) traceFileEvent(event string, uri string, before memSnapshot) {
+	if s.traceLog != nil {
+		after := captureMemSnapshot()
+		s.traceLog.LogFileEvent(event, uri, before, after)
+	}
 }
 
 func (s *Server) handleDidChangeWatchedFiles(ctx context.Context, params *lsproto.DidChangeWatchedFilesParams) error {
