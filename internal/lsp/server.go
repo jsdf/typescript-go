@@ -43,6 +43,10 @@ type ServerOptions struct {
 	TypingsLocation    string
 	ParseCache         *project.ParseCache
 	NpmInstall         func(cwd string, args []string) ([]byte, error)
+
+	// LogFile, when set, is a writer for trace logging of file requests,
+	// memory usage, and project loading information for debugging.
+	LogFile io.Writer
 }
 
 func NewServer(opts *ServerOptions) *Server {
@@ -67,6 +71,10 @@ func NewServer(opts *ServerOptions) *Server {
 		initComplete:          make(chan struct{}),
 	}
 	s.logger = newLogger(s)
+
+	if opts.LogFile != nil {
+		s.traceLog = newTraceLogger(opts.LogFile)
+	}
 
 	return s
 }
@@ -187,6 +195,10 @@ type Server struct {
 	npmInstall func(cwd string, args []string) ([]byte, error)
 
 	cpuProfiler pprof.CPUProfiler
+
+	// traceLog, when non-nil, logs file requests, memory usage, and project
+	// loading information to help debug memory consumption.
+	traceLog *traceLogger
 }
 
 func (s *Server) Session() *project.Session { return s.session }
@@ -596,6 +608,10 @@ func (s *Server) handleRequestOrNotification(ctx context.Context, req *lsproto.R
 
 	if handler := handlers()[req.Method]; handler != nil {
 		start := time.Now()
+		var memBefore memSnapshot
+		if s.traceLog != nil {
+			memBefore = captureMemSnapshot()
+		}
 		doAsyncWork, err := handler(s, ctx, req)
 		idStr := ""
 		if req.ID != nil {
@@ -611,11 +627,21 @@ func (s *Server) handleRequestOrNotification(ctx context.Context, req *lsproto.R
 					return ctx.Err()
 				}
 				asyncWorkErr := doAsyncWork()
-				s.logger.Info(core.IfElse(asyncWorkErr != nil, "error handling method '", "handled method '"), req.Method, "'", idStr, " in ", time.Since(start))
+				duration := time.Since(start)
+				s.logger.Info(core.IfElse(asyncWorkErr != nil, "error handling method '", "handled method '"), req.Method, "'", idStr, " in ", duration)
+				if s.traceLog != nil {
+					memAfter := captureMemSnapshot()
+					s.traceLog.LogRequest(string(req.Method), idStr, duration, memBefore, memAfter)
+				}
 				return asyncWorkErr
 			}, nil
 		}
-		s.logger.Info("handled method '", req.Method, "'", idStr, " in ", time.Since(start))
+		duration := time.Since(start)
+		s.logger.Info("handled method '", req.Method, "'", idStr, " in ", duration)
+		if s.traceLog != nil {
+			memAfter := captureMemSnapshot()
+			s.traceLog.LogRequest(string(req.Method), idStr, duration, memBefore, memAfter)
+		}
 		return nil, nil
 	}
 	s.logger.Warn("unknown method '", req.Method, "'")
@@ -1121,28 +1147,74 @@ func (s *Server) handleDidChangeWorkspaceConfiguration(ctx context.Context, para
 }
 
 func (s *Server) handleDidOpen(ctx context.Context, params *lsproto.DidOpenTextDocumentParams) error {
-	s.session.DidOpenFile(ctx, params.TextDocument.Uri, params.TextDocument.Version, params.TextDocument.Text, params.TextDocument.LanguageId)
+	uri := params.TextDocument.Uri
+	before := s.captureTraceMemBefore()
+	s.session.DidOpenFile(ctx, uri, params.TextDocument.Version, params.TextDocument.Text, params.TextDocument.LanguageId)
+	s.traceFileEvent("OPEN", string(uri), before)
+	s.traceLogProjects()
 	return nil
 }
 
 func (s *Server) handleDidChange(ctx context.Context, params *lsproto.DidChangeTextDocumentParams) error {
-	s.session.DidChangeFile(ctx, params.TextDocument.Uri, params.TextDocument.Version, params.ContentChanges)
+	uri := params.TextDocument.Uri
+	before := s.captureTraceMemBefore()
+	s.session.DidChangeFile(ctx, uri, params.TextDocument.Version, params.ContentChanges)
+	s.traceFileEvent("CHANGE", string(uri), before)
 	return nil
 }
 
 func (s *Server) handleDidSave(ctx context.Context, params *lsproto.DidSaveTextDocumentParams) error {
-	s.session.DidSaveFile(ctx, params.TextDocument.Uri)
+	uri := params.TextDocument.Uri
+	before := s.captureTraceMemBefore()
+	s.session.DidSaveFile(ctx, uri)
+	s.traceFileEvent("SAVE", string(uri), before)
 	return nil
 }
 
 func (s *Server) handleDidClose(ctx context.Context, params *lsproto.DidCloseTextDocumentParams) error {
-	s.session.DidCloseFile(ctx, params.TextDocument.Uri)
+	uri := params.TextDocument.Uri
+	before := s.captureTraceMemBefore()
+	s.session.DidCloseFile(ctx, uri)
+	s.traceFileEvent("CLOSE", string(uri), before)
 	return nil
+}
+
+// captureTraceMemBefore captures a memory snapshot for trace logging.
+// Returns a zero-value snapshot if tracing is not enabled.
+func (s *Server) captureTraceMemBefore() memSnapshot {
+	if s.traceLog != nil {
+		return captureMemSnapshot()
+	}
+	return memSnapshot{}
+}
+
+// traceFileEvent logs a file event with memory delta if trace logging is enabled.
+func (s *Server) traceFileEvent(event string, uri string, before memSnapshot) {
+	if s.traceLog != nil {
+		after := captureMemSnapshot()
+		s.traceLog.LogFileEvent(event, uri, before, after)
+	}
 }
 
 func (s *Server) handleDidChangeWatchedFiles(ctx context.Context, params *lsproto.DidChangeWatchedFilesParams) error {
 	s.session.DidChangeWatchedFiles(ctx, params.Changes)
 	return nil
+}
+
+// traceLogProjects logs the current set of loaded projects and their file counts to the trace log.
+func (s *Server) traceLogProjects() {
+	if s.traceLog == nil || s.session == nil {
+		return
+	}
+	snapshot, release := s.session.Snapshot()
+	defer release()
+	for _, p := range snapshot.ProjectCollection.Projects() {
+		fileCount := 0
+		if prog := p.GetProgram(); prog != nil {
+			fileCount = len(prog.SourceFiles())
+		}
+		s.traceLog.LogProjectInfo(p.Name(), fileCount)
+	}
 }
 
 func (s *Server) handleSetTrace(ctx context.Context, params *lsproto.SetTraceParams) error {

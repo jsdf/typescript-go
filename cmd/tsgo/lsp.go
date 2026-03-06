@@ -24,6 +24,7 @@ func runLSP(args []string) int {
 	_ = pipe
 	socket := flag.String("socket", "", "use socket for communication")
 	_ = socket
+	logFile := flag.String("logFile", "", "Write trace log of file requests, memory usage, and loaded projects to this file path.")
 	if err := flag.Parse(args); err != nil {
 		return 2
 	}
@@ -43,7 +44,7 @@ func runLSP(args []string) int {
 	defaultLibraryPath := bundled.LibPath()
 	typingsLocation := osvfs.GetGlobalTypingsCacheLocation()
 
-	s := lsp.NewServer(&lsp.ServerOptions{
+	opts := &lsp.ServerOptions{
 		In:                 lsp.ToReader(os.Stdin),
 		Out:                lsp.ToWriter(os.Stdout),
 		Err:                os.Stderr,
@@ -56,7 +57,20 @@ func runLSP(args []string) int {
 			cmd.Dir = cwd
 			return cmd.Output()
 		},
-	})
+	}
+
+	if *logFile != "" {
+		f, err := os.Create(*logFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create log file: %v\n", err)
+			return 1
+		}
+		defer f.Close()
+		opts.LogFile = f
+		fmt.Fprintf(os.Stderr, "trace log will be written to: %v\n", *logFile)
+	}
+
+	s := lsp.NewServer(opts)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
